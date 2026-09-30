@@ -21,7 +21,7 @@ set(CRASH_LAB_INPUTS CMakeLists.txt Kconfig prj.conf sysbuild.conf
   boards/nrf5340dk_nrf5340_cpuapp.overlay
   src/main.c src/crashes.c src/dummy_ble.c src/dump_store.c src/flash_coredump.c
   src/crashes.h src/dummy_ble.h src/dump_store.h)
-set(CRASH_LAB_FINGERPRINT "")
+set(CRASH_LAB_FINGERPRINT "git:${CRASH_LAB_GIT_SHA}\n")
 foreach(input IN LISTS CRASH_LAB_INPUTS)
   file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${input}" digest)
   string(APPEND CRASH_LAB_FINGERPRINT "${input}:${digest}\n")
