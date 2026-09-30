@@ -15,6 +15,8 @@ This repository now has three reusable pieces:
 
 Start with [Zephyr installation](docs/INSTALL_ZEPHYR.md),
 [service setup/API](docs/SERVICE.md), and [architecture/feature boundary](docs/ARCHITECTURE.md).
+The complete rendered documentation is hosted at
+<https://rudr-phi9.github.io/nrf5340-crash-ble-lab/>.
 The DK example below remains a ready-to-flash end-to-end reference.
 All newly authored SDK/service code is licensed under Apache-2.0; see
 [`LICENSE`](LICENSE).
