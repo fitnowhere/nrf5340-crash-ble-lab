@@ -148,3 +148,66 @@ $ python3 host/pull_crash.py status
 
 This measured image left the DK advertising with a valid archived dump for
 further testing; newer builds have their own ELF fingerprint.
+
+## Persistent diagnostics extension (DK hardware, September 30, 2026)
+
+Tested from source commit `1bca685` on the same DK with NCS v3.4.0. The
+sysbuild compiled both images without Kconfig/compile warnings; **nine** host
+parser/error-path tests passed. Build fingerprint:
+`7a790e03e5b53f9677bb`. Flashing a running app generated the known spurious
+134-byte partial dump; `clear` removed it before this test. No simulated event
+below is described as a real storage or OTA failure.
+
+### Logs and recoverable events without a crash
+
+```text
+$ python3 host/pull_crash.py emit storage_failure
+Injected synthetic storage_failure diagnostic (not a real failure)
+$ python3 host/pull_crash.py logs
+host/out/20260930T131100Z/events.ndjson: 3893 bytes
+host/out/20260930T131100Z/zephyr.0000: 7089 bytes
+simulated warning code=102 value=-5 boot=3 ... section=text:
+  command_work_handler .../src/dummy_ble.c:84
+health info code=20 value=2524 boot=3 t=60677ms section=text:
+  heartbeat_handler .../src/diagnostics.c:27
+ble info code=11 value=19 boot=3 ... section=text:
+  disconnected .../src/dummy_ble.c:168
+```
+
+The plain-text filesystem log contains the matching Zephyr message
+`<wrn> dummy_ble: Synthetic diagnostic 102 (not a hardware failure)` and
+`<wrn> bt_l2cap: Ignoring data for unknown channel ID 0x003a`. Those lines
+have timestamp/module/severity but no call-site PC; the structured event is
+what enables ELF file/line lookup. Earlier events on the same flash used a
+different fingerprint; the host explicitly printed `different build (requires
+its own archived ELF)` rather than mis-symbolicating them.
+
+`python3 host/pull_crash.py ota-check` returned MCUmgr image group 1
+`MGMT_ERR.ENOTSUP (8)` as designed (no MCUboot/OTA slot).
+
+### Crash, logs, and code line together
+
+```text
+$ python3 host/pull_crash.py crash assert
+Requested assert; ... Wait for reboot, then pull.
+$ python3 host/pull_crash.py pull
+host/out/20260930T131224Z/crash.bin: 444 bytes
+host/out/20260930T131224Z/events.ndjson: 5329 bytes
+host/out/20260930T131224Z/zephyr.0000: 8119 bytes
+host/out/20260930T131224Z/zephyr.0001: 1156 bytes
+GDB #1  0x00002582 in crash_assert_fail () at .../src/crashes.c:40
+VERIFIED crash_assert_fail ... src/crashes.c:40
+crash warning code=2 value=2 boot=3 ... section=text:
+  crash_schedule .../src/crashes.c:119
+ELF sha256=4dd8da58f90dfdaf13c26b7bf84c9ff0f0c4cd82e49f8bafde86e7400b2985e9
+$ python3 host/pull_crash.py reboot
+Requested clean reboot
+$ python3 host/pull_crash.py status
+"reset_reason": 2, "dump_pending": true, "dump_size": 444,
+"crash_seq": 13, "boot_count": 5,
+"log_files": ["zephyr.0000", "zephyr.0001"]
+```
+
+The ELF and event files for these measurements are in the Git-ignored
+`host/out/` folders above. Rebuilds after documentation commits receive a new
+fingerprint; replay the saved dumps with each folder's archived `zephyr.elf`.
