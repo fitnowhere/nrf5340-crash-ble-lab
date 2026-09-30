@@ -214,6 +214,10 @@ fingerprint; replay the saved dumps with each folder's archived `zephyr.elf`.
 
 ## Reusable SDK and service validation
 
+> These are dated measurements, not production guarantees. The current
+> architecture/security qualifications in `docs/ARCHITECTURE.md` supersede
+> earlier uses of “fault-safe,” “independent verification,” or “persistent.”
+
 The diagnostic implementation was subsequently extracted to the discoverable
 Zephyr module at `sdk/zephyr/`; a pristine nRF5340 sysbuild completed with no
 warnings and exported `diag_sdk_start`, `diag_sdk_record`, status, and log-file
@@ -229,7 +233,7 @@ log_count: 270
 ```
 
 An earlier real divide-by-zero archive was also uploaded through the gateway;
-the server independently validated its ELF and returned:
+the server checked the archive's ELF/fingerprint/SHA consistency and returned:
 
 ```text
 reason: Divide-by-zero UsageFault at crash_div_by_zero

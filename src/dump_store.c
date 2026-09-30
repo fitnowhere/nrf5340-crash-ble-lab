@@ -1,5 +1,6 @@
 #include "dump_store.h"
 #include "crashes.h"
+#include "flash_coredump.h"
 #include "build_id.h"
 
 #include <stdarg.h>
@@ -18,6 +19,7 @@ LOG_MODULE_REGISTER(dump_store, LOG_LEVEL_DBG);
 #define STORAGE_PARTITION storage_partition
 #define STORAGE_ID PARTITION_ID(STORAGE_PARTITION)
 #define CRASH_PATH "/lfs/crash.bin"
+#define CRASH_TEMP_PATH "/lfs/crash.tmp"
 #define META_PATH "/lfs/meta.txt"
 #define LOG_PATH "/lfs/recent.log"
 #define ARMED_PATH "/lfs/armed.txt"
@@ -40,14 +42,24 @@ static uint32_t sequence;
 
 static int write_text(const char *path, const char *text)
 {
+	char temporary[64];
+	if (snprintk(temporary, sizeof(temporary), "%s.tmp", path) >= sizeof(temporary)) {
+		return -ENAMETOOLONG;
+	}
 	struct fs_file_t file;
 	fs_file_t_init(&file);
-	int ret = fs_open(&file, path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+	int ret = fs_open(&file, temporary, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
 	if (ret == 0) {
 		ssize_t wrote = fs_write(&file, text, strlen(text));
 		ret = wrote == (ssize_t)strlen(text) ? fs_sync(&file) : -EIO;
 	}
 	(void)fs_close(&file);
+	if (ret == 0) {
+		ret = fs_rename(temporary, path);
+	}
+	if (ret != 0) {
+		(void)fs_unlink(temporary);
+	}
 	return ret;
 }
 
@@ -81,10 +93,15 @@ static int copy_coredump_to_file(void)
 	if (coredump_cmd(COREDUMP_CMD_VERIFY_STORED_DUMP, NULL) != 1) {
 		return -EBADMSG;
 	}
+	char crash_fingerprint[21];
+	int ret = flash_coredump_build_fingerprint(crash_fingerprint);
+	if (ret != 0) {
+		return ret;
+	}
 
 	struct fs_file_t file;
 	fs_file_t_init(&file);
-	int ret = fs_open(&file, CRASH_PATH, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+	ret = fs_open(&file, CRASH_TEMP_PATH, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
 	if (ret != 0) {
 		return ret;
 	}
@@ -109,6 +126,12 @@ static int copy_coredump_to_file(void)
 	}
 	(void)fs_close(&file);
 	if (ret != 0) {
+		(void)fs_unlink(CRASH_TEMP_PATH);
+		return ret;
+	}
+	ret = fs_rename(CRASH_TEMP_PATH, CRASH_PATH);
+	if (ret != 0) {
+		(void)fs_unlink(CRASH_TEMP_PATH);
 		return ret;
 	}
 
@@ -132,10 +155,12 @@ static int copy_coredump_to_file(void)
 
 	char meta[320];
 	snprintk(meta, sizeof(meta),
-		"{\"build\":\"%s+%s\",\"fingerprint\":\"%s\",\"version\":\"%s\","
+		"{\"build\":\"%s+%s\",\"fingerprint\":\"%s\","
+		"\"collector_fingerprint\":\"%s\",\"version\":\"%s\","
 		"\"crash_seq\":%u,\"reset_reason\":%u,\"expected\":\"%s\","
 		"\"dump_size\":%u}\n",
-		CONFIG_CRASH_LAB_VERSION, CRASH_LAB_GIT_SHA, CRASH_LAB_FINGERPRINT,
+		CONFIG_CRASH_LAB_VERSION, CRASH_LAB_GIT_SHA, crash_fingerprint,
+		CRASH_LAB_FINGERPRINT,
 		CONFIG_CRASH_LAB_VERSION,
 		sequence, reset_reason, armed, (unsigned int)saved_size);
 	ret = write_text(META_PATH, meta);
@@ -242,11 +267,21 @@ uint32_t dump_store_sequence(void) { return sequence; }
 
 int dump_store_clear(void)
 {
-	(void)fs_unlink(CRASH_PATH);
-	(void)fs_unlink(META_PATH);
-	(void)fs_unlink(LOG_PATH);
-	(void)fs_unlink(ARMED_PATH);
-	pending = false;
-	saved_size = 0;
-	return coredump_cmd(COREDUMP_CMD_ERASE_STORED_DUMP, NULL);
+	const char *paths[] = {CRASH_PATH, META_PATH, LOG_PATH, ARMED_PATH, CRASH_TEMP_PATH};
+	int first_error = 0;
+	for (size_t i = 0; i < ARRAY_SIZE(paths); ++i) {
+		int ret = fs_unlink(paths[i]);
+		if (ret != 0 && ret != -ENOENT && first_error == 0) {
+			first_error = ret;
+		}
+	}
+	int ret = coredump_cmd(COREDUMP_CMD_ERASE_STORED_DUMP, NULL);
+	if (ret != 0 && first_error == 0) {
+		first_error = ret;
+	}
+	if (first_error == 0) {
+		pending = false;
+		saved_size = 0;
+	}
+	return first_error;
 }

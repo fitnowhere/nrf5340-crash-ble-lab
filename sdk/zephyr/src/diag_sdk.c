@@ -21,6 +21,29 @@ static void path(char *buffer, size_t length, const char *name)
 	snprintk(buffer, length, "%s/%s", CONFIG_DIAG_SDK_MOUNT_POINT, name);
 }
 
+static int replace_text(const char *filename, const char *text)
+{
+	char temporary[104];
+	if (snprintk(temporary, sizeof(temporary), "%s.tmp", filename) >= sizeof(temporary)) {
+		return -ENAMETOOLONG;
+	}
+	struct fs_file_t file;
+	fs_file_t_init(&file);
+	int ret = fs_open(&file, temporary, FS_O_CREATE | FS_O_TRUNC | FS_O_WRITE);
+	if (ret == 0) {
+		ret = fs_write(&file, text, strlen(text)) == (ssize_t)strlen(text) ?
+			fs_sync(&file) : -EIO;
+	}
+	(void)fs_close(&file);
+	if (ret == 0) {
+		ret = fs_rename(temporary, filename);
+	}
+	if (ret != 0) {
+		(void)fs_unlink(temporary);
+	}
+	return ret;
+}
+
 static void heartbeat_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -60,17 +83,7 @@ int diag_sdk_start(const char *build_fingerprint)
 	boot_count++;
 	char next[24];
 	snprintk(next, sizeof(next), "%u\n", boot_count);
-	fs_file_t_init(&file);
-	int ret = fs_open(&file, filename, FS_O_CREATE | FS_O_TRUNC | FS_O_WRITE);
-	if (ret != 0) {
-		return ret;
-	}
-	if (fs_write(&file, next, strlen(next)) != (ssize_t)strlen(next)) {
-		ret = -EIO;
-	} else {
-		ret = fs_sync(&file);
-	}
-	(void)fs_close(&file);
+	int ret = replace_text(filename, next);
 	if (ret != 0) {
 		return ret;
 	}

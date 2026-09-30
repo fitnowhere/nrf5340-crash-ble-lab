@@ -80,9 +80,10 @@ class DumpTests(unittest.TestCase):
                        "value": 2, "boot": 1, "uptime_ms": 0, "pc": "0x00001009"}]
             (folder / "events.ndjson").write_text("\n".join(map(json.dumps, events)))
             with patch.object(lab, "validate_elf"), patch.object(elffile, "ELFFile", FakeELF), \
-                 patch.object(lab, "addr2line", return_value="disconnected\nsrc/dummy_ble.c:164") as resolve:
+                  patch.object(lab, "addr2line_many",
+                               return_value={0x1008: "disconnected\nsrc/dummy_ble.c:164"}) as resolve:
                 result = lab.decode_events(folder, folder / "zephyr.elf", "tool", "a" * 20)
-            resolve.assert_called_once_with(folder / "zephyr.elf", 0x1008, "tool")
+            resolve.assert_called_once_with(folder / "zephyr.elf", {0x1008}, "tool")
             self.assertEqual(result[0]["section"], ".text")
             self.assertIn("different build", result[1]["location"])
 

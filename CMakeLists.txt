@@ -41,7 +41,7 @@ endforeach()
 set(CRASH_LAB_INPUTS CMakeLists.txt Kconfig prj.conf sysbuild.conf
   boards/nrf5340dk_nrf5340_cpuapp.overlay
   src/main.c src/crashes.c src/dummy_ble.c src/dump_store.c src/flash_coredump.c
-  src/crashes.h src/dummy_ble.h src/dump_store.h src/diagnostics.h
+  src/crashes.h src/dummy_ble.h src/dump_store.h src/diagnostics.h src/flash_coredump.h
   sdk/zephyr/src/diag_sdk.c sdk/zephyr/include/diag_sdk/diag_sdk.h
   sdk/zephyr/Kconfig sdk/zephyr/CMakeLists.txt sdk/zephyr/zephyr/module.yml
   zephyr/module.yml)

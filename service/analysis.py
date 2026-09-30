@@ -12,6 +12,9 @@ import subprocess
 from elftools.elf.elffile import ELFFile
 from elftools.common.exceptions import ELFError
 
+MAX_EVENTS = 4096
+MAX_EVENT_LINE = 4096
+
 
 def verify_elf(data: bytes, fingerprint: str) -> str:
     if not re.fullmatch(r"[a-f0-9]{20}", fingerprint):
@@ -69,12 +72,16 @@ def locate_tool(name: str) -> str | None:
 
 
 def address_location(elf: Path, pc: int, sections: list[tuple[str, int, int]],
-                     *, return_address: bool = False) -> dict:
+                     *, return_address: bool = False,
+                     resolved: dict[int, tuple[str | None, str | None, int | None]] | None = None) -> dict:
     addr = (pc & ~1) - (1 if return_address else 0)
     section = next((name for name, start, end in sections if start <= addr < end), None)
     result = {"address": f"0x{pc:08x}", "section": section,
               "function": None, "file": None, "line": None}
     if section is None:
+        return result
+    if resolved is not None and addr in resolved:
+        result["function"], result["file"], result["line"] = resolved[addr]
         return result
     tool = locate_tool("arm-zephyr-eabi-addr2line")
     if not tool:
@@ -95,6 +102,38 @@ def address_location(elf: Path, pc: int, sections: list[tuple[str, int, int]],
             result["file"] = filename
             match = re.match(r"(\d+)", line)
             result["line"] = int(match.group(1)) if match else None
+    return result
+
+
+def resolve_addresses(elf: Path, addresses: set[int]) -> dict[int, tuple[str | None, str | None, int | None]]:
+    """Resolve unique addresses with one bounded addr2line process."""
+    ordered = sorted(addresses)
+    if not ordered:
+        return {}
+    tool = locate_tool("arm-zephyr-eabi-addr2line")
+    if not tool:
+        return {}
+    try:
+        process = subprocess.run(
+            [tool, "-f", "-C", "-e", str(elf), *(f"0x{address:x}" for address in ordered)],
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return {}
+    lines = process.stdout.splitlines()
+    if len(lines) != len(ordered) * 2:
+        return {}
+    result = {}
+    for index, address in enumerate(ordered):
+        function = lines[index * 2]
+        location = lines[index * 2 + 1]
+        filename = None
+        line_number = None
+        if ":" in location and not location.startswith("??"):
+            filename, line = location.rsplit(":", 1)
+            match = re.match(r"(\d+)", line)
+            line_number = int(match.group(1)) if match else None
+        result[address] = (function if function != "??" else None, filename, line_number)
     return result
 
 
@@ -155,12 +194,16 @@ def analyze_crash(data: bytes, elf: Path, sections: list[tuple[str, int, int]],
 
 
 def analyze_events(data: bytes, elf: Path, sections: list[tuple[str, int, int]],
-                   fingerprint: str) -> list[dict]:
+                    fingerprint: str) -> list[dict]:
     events = []
-    for number, raw in enumerate(data.splitlines(), 1):
+    matching_addresses = set()
+    for number, raw in enumerate(BytesIO(data), 1):
+        if number > MAX_EVENTS:
+            raise ValueError(f"Diagnostic event count exceeds {MAX_EVENTS}")
+        raw = raw.rstrip(b"\r\n")
         if not raw:
             continue
-        if len(raw) > 4096:
+        if len(raw) > MAX_EVENT_LINE:
             raise ValueError(f"Diagnostic event line {number} too long")
         import json
         try:
@@ -171,7 +214,9 @@ def analyze_events(data: bytes, elf: Path, sections: list[tuple[str, int, int]],
                 raise ValueError("Missing numeric event code/value")
             if event.get("fingerprint") == fingerprint:
                 pc = int(event["pc"], 16)
-                event["location"] = address_location(elf, pc, sections, return_address=True)
+                address = (pc & ~1) - 1
+                matching_addresses.add(address)
+                event["_address"] = address
                 event["mismatched_build"] = False
             else:
                 event["location"] = None
@@ -179,4 +224,11 @@ def analyze_events(data: bytes, elf: Path, sections: list[tuple[str, int, int]],
         except (ValueError, TypeError, KeyError) as exc:
             raise ValueError(f"Invalid diagnostic event line {number}: {exc}") from exc
         events.append(event)
+    resolved = resolve_addresses(elf, matching_addresses)
+    for event in events:
+        if "_address" in event:
+            pc = int(event["pc"], 16)
+            event["location"] = address_location(
+                elf, pc, sections, return_address=True, resolved=resolved)
+            del event["_address"]
     return events

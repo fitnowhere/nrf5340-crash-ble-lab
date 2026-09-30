@@ -28,4 +28,12 @@ config CRASH_LAB_STACK_SMASH
 	help
 	  Adds crash type 4. Types 0..3 are always available.
 
+config CRASH_LAB_UNSAFE_BLE_COMMANDS
+	bool "Allow unauthenticated destructive BLE lab commands"
+	default n
+	help
+	  Exposes intentional crash, reboot, evidence-clear, and synthetic event
+	  commands through the custom GATT characteristic. This is only appropriate
+	  for an isolated development bench. Leave disabled in derived firmware.
+
 endmenu

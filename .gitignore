@@ -2,6 +2,8 @@ build/
 .venv/
 host/out/
 service/data/
+site/
+dist/
 .pytest_cache/
 *.egg-info/
 __pycache__/

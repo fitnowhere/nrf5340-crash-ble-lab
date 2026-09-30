@@ -1,6 +1,7 @@
 from io import BytesIO
 import json
 from pathlib import Path
+import struct
 import zipfile
 
 from fastapi.testclient import TestClient
@@ -13,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 ARCHIVE = ROOT / "host/out/20260930T131704Z"
 ASSERT_ARCHIVE = ROOT / "host/out/20260930T131224Z"
 LOG_ARCHIVE = ROOT / "host/out/20260930T131603Z"
+FIXTURE_ELF = Path(__file__).parent / "fixtures/fixture.elf"
+FIXTURE_FINGERPRINT = "0123456789abcdefabcd"
 
 
 def zip_files(files: dict[str, bytes]):
@@ -29,7 +32,27 @@ def real_files(folder=ARCHIVE):
     return {path.name: path.read_bytes() for path in folder.iterdir()
             if path.name in {"manifest.json", "zephyr.elf", "crash.bin", "meta.txt",
                              "events.ndjson", "recent.log"} or
-            path.name.startswith("zephyr.") and path.name[7:].isdigit()}
+             path.name.startswith("zephyr.") and path.name[7:].isdigit()}
+
+
+def synthetic_files():
+    elf = FIXTURE_ELF.read_bytes()
+    header = struct.pack("<2sHHBBI", b"ZE", 2, 3, 5, 0, 30)
+    registers = struct.pack("<9I", 0, 0, 0, 0, 0, 0x1005, 0x1001, 0, 0x20001000)
+    dump = header + struct.pack("<cHH", b"A", 3, len(registers)) + registers
+    status = {"fingerprint": FIXTURE_FINGERPRINT, "build": "fixture-1",
+              "crash_seq": 1, "dump_pending": True, "dump_size": len(dump),
+              "log_files": ["zephyr.0000"]}
+    manifest = {"device": "fixture-device", "status": status,
+                "elf_sha256": __import__("hashlib").sha256(elf).hexdigest()}
+    event = {"v": 1, "fingerprint": FIXTURE_FINGERPRINT, "boot": 1,
+             "uptime_ms": 10, "level": "error", "category": "fixture",
+             "code": 42, "value": -5, "pc": "0x00001009"}
+    meta = {"fingerprint": FIXTURE_FINGERPRINT, "dump_size": len(dump), "crash_seq": 1}
+    return {"manifest.json": json.dumps(manifest).encode(), "zephyr.elf": elf,
+            "crash.bin": dump, "meta.txt": json.dumps(meta).encode(),
+            "events.ndjson": (json.dumps(event) + "\n").encode(),
+            "zephyr.0000": b"[00:00:01.000] <err> fixture: failed\n"}
 
 
 def client(tmp_path):
@@ -58,6 +81,27 @@ def test_missing_artifacts_rejected(tmp_path):
     response = app.post("/api/v1/reports", headers=credentials(),
                         content=zip_files({"manifest.json": b"{}"}))
     assert response.status_code == 422
+
+
+def test_tracked_fixture_ingests_and_symbolicates_in_clean_clone(tmp_path):
+    app = client(tmp_path)
+    response = app.post("/api/v1/reports", headers=credentials(),
+                        content=zip_files(synthetic_files()))
+    assert response.status_code == 201, response.text
+    detail = app.get(f"/api/v1/reports/{response.json()['id']}", headers=credentials()).json()
+    assert detail["reason"] == "Divide-by-zero UsageFault"
+    assert detail["pc"]["function"] == "fixture_fault"
+    assert detail["events"][0]["location"]["function"] == "_start"
+    assert detail["logs"][0]["module"] == "fixture"
+
+
+def test_resource_amplification_limits(tmp_path):
+    app = client(tmp_path)
+    files = synthetic_files()
+    files["zephyr.0000"] = b"x\n" * 10001
+    response = app.post("/api/v1/reports", headers=credentials(), content=zip_files(files))
+    assert response.status_code == 422
+    assert "Log line count" in response.text
 
 
 def test_real_archive_issue_and_replay(tmp_path):

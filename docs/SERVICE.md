@@ -82,7 +82,8 @@ line number. Issue keys group the same reason/function across builds.
 
 ## Limits, retention and security
 
-ZIP upload limit: 20 MiB, ELF: 16 MiB, coredump: 64 KiB. Archive members must
+ZIP upload limit: 20 MiB, ELF: 16 MiB, coredump: 64 KiB, events: 4096 records,
+logs: 10,000 nonempty lines, individual event/log line: 4096 bytes. Archive members must
 be flat allowlisted filenames; traversal, duplicate entries, build mismatch
 and malformed logs are rejected. Persistent storage lives under
 `DIAG_SERVICE_DATA`; back it up and define a retention policy yourself. The
@@ -90,6 +91,12 @@ service does not yet include SSO, encrypted-at-rest storage, hosted source
 viewing, fleet alerting, OTA orchestration, automated production uploads,
 RBAC, tenant isolation, or guaranteed delivery across power loss. HTTP Basic
 and Bearer tokens must never traverse an unencrypted public connection.
+
+The provided container runs as a non-root user; Compose drops capabilities,
+uses a read-only root filesystem, and sets CPU/memory/PID limits. ELF and GDB
+tools still parse attacker-controlled input, so an Internet-facing production
+deployment should move analysis into a separate networkless sandbox and add
+rate limits, monitoring, backups, and an immutable symbol-artifact registry.
 
 The server can decode an uploaded ELF only if `DIAG_ADDR2LINE` (or the Zephyr
 SDK toolchain) is installed. GDB's full backtrace additionally needs
@@ -106,4 +113,4 @@ python3 -m unittest discover -s host/tests -q
 The API tests check auth, malicious ZIP names, missing/mismatched ELF, bad
 dump size, issue grouping, replay/idempotency, XSS escaping, and a real DK
 archive when one is available locally. Hardware proof transcripts are in
-[`LAB.md`](../LAB.md).
+[`LAB.md`](https://github.com/rudr-phi9/nrf5340-crash-ble-lab/blob/lab/nrf5340-crash-ble/LAB.md).

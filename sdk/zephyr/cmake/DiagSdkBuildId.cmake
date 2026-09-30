@@ -1,6 +1,5 @@
-# A caller-owned, reproducible 20-character firmware fingerprint. Include this
-# after find_package(Zephyr) and provide every source/config/overlay affecting
-# the app image. Zephyr's .config and the current Git commit are included.
+# A caller-owned, source-content 20-character firmware fingerprint. This is a
+# mismatch guard, not a cryptographic identity for the final linked ELF.
 function(diag_sdk_fingerprint output_variable)
   cmake_parse_arguments(DIAG "" "" "SOURCES" ${ARGN})
   if(NOT DIAG_SOURCES)
@@ -13,14 +12,19 @@ function(diag_sdk_fingerprint output_variable)
   if(NOT revision)
     set(revision "uncommitted")
   endif()
-  set(seed "git:${revision}\n")
+  set(seed "git:${revision}\nboard:${BOARD}\nzephyr:${ZEPHYR_VERSION}\n")
+  string(APPEND seed "compiler:${CMAKE_C_COMPILER_ID}:${CMAKE_C_COMPILER_VERSION}\n")
+  set(source_index 0)
   foreach(source IN LISTS DIAG_SOURCES)
     if(NOT EXISTS "${source}")
       message(FATAL_ERROR "Diagnostic fingerprint source missing: ${source}")
     endif()
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${source}")
     file(SHA256 "${source}" digest)
-    string(APPEND seed "${source}:${digest}\n")
+    # Deliberately omit absolute checkout paths so identical ordered inputs in
+    # two workspace locations produce the same mismatch guard.
+    string(APPEND seed "source-${source_index}:${digest}\n")
+    math(EXPR source_index "${source_index} + 1")
   endforeach()
   if(EXISTS "${APPLICATION_BINARY_DIR}/zephyr/.config")
     file(SHA256 "${APPLICATION_BINARY_DIR}/zephyr/.config" config_digest)

@@ -30,7 +30,11 @@ SAMPLES = {"recoverable": 0x20, "ble_failure": 0x21,
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ELF = ROOT / "build" / "nrf5340-crash-ble-lab" / "zephyr" / "zephyr.elf"
 UPLOAD_FILES = {"manifest.json", "zephyr.elf", "crash.bin", "meta.txt",
-                "events.ndjson", "recent.log"}
+                 "events.ndjson", "recent.log"}
+MAX_DEVICE_FILE = 1024 * 1024
+MAX_CRASH_FILE = 65536
+MAX_EVENT_LINES = 4096
+MAX_EVENT_LINE = 4096
 
 
 def find_zephyr_tool(name: str) -> str:
@@ -129,6 +133,9 @@ def validate_elf(elf: Path, meta: dict):
         image = ELFFile(stream)
         if image.get_section_by_name(".debug_info") is None:
             raise ValueError(f"Unstripped app-core ELF required: {elf}")
+        if (image["e_machine"] != "EM_ARM" or image.elfclass != 32 or
+                not image.little_endian or image["e_type"] != "ET_EXEC"):
+            raise ValueError(f"Expected a 32-bit little-endian executable ARM ELF: {elf}")
         fingerprint = meta.get("fingerprint")
         if not fingerprint or not re.fullmatch(r"[0-9a-f]{20}", fingerprint):
             raise ValueError("Dump metadata has no valid build fingerprint")
@@ -157,9 +164,24 @@ def addr2line(elf: Path, addr: int, tool: str) -> str:
     # LR is the return address after a BL/BLX and so must be reduced to its call site.
     result = subprocess.run(
         [tool, "-e", str(elf), "-f", "-C", "-i", f"0x{addr:x}"],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, timeout=10,
     )
     return result.stdout.strip()
+
+
+def addr2line_many(elf: Path, addresses: set[int], tool: str) -> dict[int, str]:
+    ordered = sorted(addresses)
+    if not ordered:
+        return {}
+    result = subprocess.run(
+        [tool, "-e", str(elf), "-f", "-C", *(f"0x{address:x}" for address in ordered)],
+        capture_output=True, text=True, check=True, timeout=15,
+    )
+    lines = result.stdout.splitlines()
+    if len(lines) != len(ordered) * 2:
+        raise ValueError("Unexpected batched addr2line output")
+    return {address: "\n".join(lines[index * 2:index * 2 + 2])
+            for index, address in enumerate(ordered)}
 
 
 def symbolicate(dump: Path, elf: Path, addr2line_tool: str) -> dict:
@@ -191,9 +213,10 @@ def symbolicate(dump: Path, elf: Path, addr2line_tool: str) -> dict:
     gdb_match = next((line for line in (trace or "").splitlines()
                       if re.match(r"^#\d+\s", line) and symbol in line), None)
     if not matching and not gdb_match:
-        raise ValueError(f"Expected {symbol} not found at fault PC or LR; inspect full GDB backtrace")
-    location = gdb_match or matching[0][2]
-    print(f"VERIFIED {symbol} at {location} (reason={regs['reason']}, ELF sha256={digest})")
+        print(f"WARNING: requested test marker {symbol} does not match the captured fault; "
+              "preserving spontaneous crash evidence", file=sys.stderr)
+    location = gdb_match or (matching[0][2] if matching else frames[0][2])
+    print(f"VERIFIED ELF/dump at {location} (reason={regs['reason']}, ELF sha256={digest})")
     return {"registers": regs, "symbol": symbol, "frame": location,
             "elf_sha256": digest, "meta": meta, "gdb_backtrace": trace}
 
@@ -211,9 +234,17 @@ def decode_events(folder: Path, elf: Path, tool: str, fingerprint: str) -> list[
         sections = [(s.name, s["sh_addr"], s["sh_addr"] + s["sh_size"])
                     for s in image.iter_sections() if s["sh_flags"] & 4]
     decoded = []
-    for number, line in enumerate(source.read_text().splitlines(), 1):
+    addresses = set()
+    for number, raw in enumerate(BytesIO(source.read_bytes()), 1):
+        if number > MAX_EVENT_LINES:
+            raise ValueError(f"Diagnostic event count exceeds {MAX_EVENT_LINES}")
+        raw = raw.rstrip(b"\r\n")
+        if not raw:
+            continue
+        if len(raw) > MAX_EVENT_LINE:
+            raise ValueError(f"Diagnostic event line {number} too long")
         try:
-            event = json.loads(line)
+            event = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError(f"Corrupt diagnostic event line {number}: {exc}") from exc
         if event.get("fingerprint") != fingerprint:
@@ -225,8 +256,14 @@ def decode_events(folder: Path, elf: Path, tool: str, fingerprint: str) -> list[
                 event["location"] = "PC outside executable ELF sections"
             else:
                 event["section"] = section
-                event["location"] = addr2line(elf, addr, tool)
+                event["_address"] = addr
+                addresses.add(addr)
         decoded.append(event)
+    locations = addr2line_many(elf, addresses, tool)
+    for event in decoded:
+        if "_address" in event:
+            event["location"] = locations[event.pop("_address")]
+    for event in decoded:
         print(f"{event['category']} {event.get('level', 'unknown')} "
               f"code={event['code']} value={event['value']} boot={event['boot']} "
               f"t={event['uptime_ms']}ms section={event.get('section', 'n/a')}: "
@@ -245,7 +282,12 @@ async def download_optional(smp, folder: Path, filename: str):
         if "FILE_NOT_FOUND" in str(status):
             return
         raise RuntimeError(f"Filesystem status failed for {name}: {status}")
+    limit = MAX_CRASH_FILE if filename == "crash.bin" else MAX_DEVICE_FILE
+    if status.len < 0 or status.len > limit:
+        raise ValueError(f"Device file {name} exceeds {limit} bytes")
     payload = await smp.download_file(name, timeout_s=12)
+    if len(payload) != status.len:
+        raise ValueError(f"Device file {name} changed during transfer")
     (folder / filename).write_bytes(payload)
     print(f"{folder / filename}: {len(payload)} bytes")
 
@@ -291,7 +333,18 @@ async def read_status(device):
     from bleak import BleakClient
 
     async with BleakClient(device, timeout=20) as client:
-        return json.loads(bytes(await client.read_gatt_char(STATUS)))
+        status = json.loads(bytes(await client.read_gatt_char(STATUS)))
+    required = {"build": str, "fingerprint": str, "dump_pending": bool,
+                "dump_size": int, "crash_seq": int, "log_files": list}
+    if any(not isinstance(status.get(key), kind) for key, kind in required.items()):
+        raise ValueError("Malformed diagnostic status schema")
+    if (not re.fullmatch(r"[0-9a-f]{20}", status["fingerprint"]) or
+            not 1 <= len(status["build"]) <= 128 or
+            not 0 <= status["dump_size"] <= MAX_CRASH_FILE or
+            len(status["log_files"]) > 8 or
+            any(not isinstance(name, str) for name in status["log_files"])):
+        raise ValueError("Invalid diagnostic status values")
+    return status
 
 
 async def command(device, value: int):
@@ -316,31 +369,30 @@ async def pull(device, elf: Path, tool: str, skip_symbolicate: bool,
     try:
         async with SMPClient(SMPBLETransport(), device.address, timeout_s=12) as smp:
             for name in FILES:
-                payload = await smp.download_file("/lfs/" + name, timeout_s=12)
-                (folder / name).write_bytes(payload)
-                print(f"{folder / name}: {len(payload)} bytes")
+                await download_optional(smp, folder, name)
             await download_diagnostics(smp, folder, status)
+        if not all((folder / name).is_file() for name in ("meta.txt", "crash.bin")):
+            raise ValueError("Device has no complete crash.bin/meta.txt pair")
+        meta = json.loads((folder / "meta.txt").read_text())
+        if status["fingerprint"] != meta["fingerprint"] or status["crash_seq"] != meta["crash_seq"]:
+            raise ValueError("Dump changed or belongs to another firmware build; use its archived ELF")
+        if status["dump_size"] != len((folder / "crash.bin").read_bytes()):
+            raise ValueError("SMP transfer size does not match firmware status")
+        digest = validate_elf(elf, meta)
+        shutil.copy2(elf, folder / "zephyr.elf")
+        (folder / "manifest.json").write_text(json.dumps({"device": device.address,
+            "elf_sha256": digest, "status": status}, indent=2) + "\n")
+        print(f"Archived matching unstripped app ELF: {folder / 'zephyr.elf'}")
+        if server_url:
+            upload_archive(folder, server_url, token)
+        if not skip_symbolicate:
+            result = symbolicate(folder / "crash.bin", folder / "zephyr.elf", tool)
+            (folder / "symbolication.json").write_text(json.dumps(result, indent=2) + "\n")
+            decode_events(folder, folder / "zephyr.elf", tool, meta["fingerprint"])
+        return folder
     except Exception as exc:
         record_host_failure(folder, device, status, exc)
         raise
-
-    meta = json.loads((folder / "meta.txt").read_text())
-    if status["fingerprint"] != meta["fingerprint"] or status["crash_seq"] != meta["crash_seq"]:
-        raise ValueError("Dump changed during transfer; retry after device stabilizes")
-    if status["dump_size"] != len((folder / "crash.bin").read_bytes()):
-        raise ValueError("SMP transfer size does not match firmware status")
-    digest = validate_elf(elf, meta)
-    shutil.copy2(elf, folder / "zephyr.elf")
-    (folder / "manifest.json").write_text(json.dumps({"device": device.address,
-        "elf_sha256": digest, "status": status}, indent=2) + "\n")
-    print(f"Archived matching unstripped app ELF: {folder / 'zephyr.elf'}")
-    if server_url:
-        upload_archive(folder, server_url, token)
-    if not skip_symbolicate:
-        result = symbolicate(folder / "crash.bin", folder / "zephyr.elf", tool)
-        (folder / "symbolication.json").write_text(json.dumps(result, indent=2) + "\n")
-        decode_events(folder, folder / "zephyr.elf", tool, meta["fingerprint"])
-    return folder
 
 
 async def logs(device, elf: Path, tool: str, server_url: str | None = None,
@@ -354,16 +406,16 @@ async def logs(device, elf: Path, tool: str, server_url: str | None = None,
     try:
         async with SMPClient(SMPBLETransport(), device.address, timeout_s=12) as smp:
             await download_diagnostics(smp, folder, status)
+        shutil.copy2(elf, folder / "zephyr.elf")
+        (folder / "manifest.json").write_text(json.dumps({"device": device.address,
+            "elf_sha256": digest, "status": status}, indent=2) + "\n")
+        if server_url:
+            upload_archive(folder, server_url, token)
+        decode_events(folder, folder / "zephyr.elf", tool, status["fingerprint"])
+        print(f"Saved diagnostics to {folder}")
     except Exception as exc:
         record_host_failure(folder, device, status, exc)
         raise
-    shutil.copy2(elf, folder / "zephyr.elf")
-    (folder / "manifest.json").write_text(json.dumps({"device": device.address,
-        "elf_sha256": digest, "status": status}, indent=2) + "\n")
-    if server_url:
-        upload_archive(folder, server_url, token)
-    decode_events(folder, folder / "zephyr.elf", tool, status["fingerprint"])
-    print(f"Saved diagnostics to {folder}")
 
 
 async def main(args):

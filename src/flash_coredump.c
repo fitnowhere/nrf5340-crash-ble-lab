@@ -1,4 +1,4 @@
-/* Standalone fault-safe nRF5340 internal-flash Zephyr coredump backend.
+/* Standalone fault-context nRF5340 internal-flash Zephyr coredump backend.
  *
  * soc_flash_nrf.c serializes writes using k_sem_take(K_FOREVER), which asserts
  * in exception context when CONFIG_ASSERT=y. The generic flash-partition
@@ -8,6 +8,8 @@
  * this partition. This lab must not trigger faults during an active flash
  * operation or run another app-core writer while the dump is being saved.
  */
+#include "flash_coredump.h"
+#include "build_id.h"
 #include <errno.h>
 #include <string.h>
 #include <nrfx_nvmc.h>
@@ -17,8 +19,9 @@
 #define DUMP_NODE coredump_partition
 #define DUMP_START PARTITION_OFFSET(DUMP_NODE)
 #define DUMP_BYTES PARTITION_SIZE(DUMP_NODE)
-#define HEADER_BYTES 16U
+#define HEADER_BYTES 36U
 #define MAGIC 0x42444c43U /* "CLDB" in little endian */
+#define HEADER_VERSION 1U
 
 BUILD_ASSERT(DUMP_BYTES == 65536U, "The lab uses a 64 KiB crash partition");
 BUILD_ASSERT((DUMP_START % 4096) == 0, "NVMC erase requires page alignment");
@@ -99,18 +102,39 @@ static void end(void)
 	}
 	program_word(4, length);
 	program_word(8, checksum);
-	program_word(12, 0);
+	program_word(12, HEADER_VERSION);
+	for (uint32_t i = 0; i < 20; i += 4) {
+		uint32_t word;
+		memcpy(&word, CRASH_LAB_FINGERPRINT + i, sizeof(word));
+		program_word(16 + i, word);
+	}
 	program_word(0, MAGIC); /* commit marker, written only after all data */
 }
 
 static int stored_size(void)
 {
 	uint32_t size = flash_word(4);
-	if (flash_word(0) != MAGIC || flash_word(12) != 0 ||
+	if (flash_word(0) != MAGIC || flash_word(12) != HEADER_VERSION ||
 	    size < 17 || size > DUMP_BYTES - HEADER_BYTES) {
 		return 0;
 	}
 	return (int)size;
+}
+
+int flash_coredump_build_fingerprint(char output[21])
+{
+	if (output == NULL || stored_size() <= 0) {
+		return -EINVAL;
+	}
+	memcpy(output, (const void *)(uintptr_t)(DUMP_START + 16), 20);
+	output[20] = '\0';
+	for (size_t i = 0; i < 20; ++i) {
+		if (!((output[i] >= '0' && output[i] <= '9') ||
+		      (output[i] >= 'a' && output[i] <= 'f'))) {
+			return -EBADMSG;
+		}
+	}
+	return 0;
 }
 
 static int verify(void)

@@ -10,6 +10,7 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/mgmt/mcumgr/mgmt/callbacks.h>
 #include <zephyr/mgmt/mcumgr/transport/smp_bt.h>
 #include <zephyr/sys/reboot.h>
 
@@ -29,25 +30,61 @@ static struct k_work command_work;
 static struct k_work advertise_work;
 static char status_json[384];
 
-static void update_status(void)
+static int json_escape(char *output, size_t output_size, const char *input)
+{
+	size_t used = 0;
+	for (; *input != '\0'; ++input) {
+		const char *replacement = NULL;
+		if (*input == '"') {
+			replacement = "\\\"";
+		} else if (*input == '\\') {
+			replacement = "\\\\";
+		} else if ((unsigned char)*input < 0x20) {
+			return -EINVAL;
+		}
+		size_t added = replacement != NULL ? 2 : 1;
+		if (used + added >= output_size) {
+			return -ENOSPC;
+		}
+		if (replacement != NULL) {
+			memcpy(output + used, replacement, added);
+		} else {
+			output[used] = *input;
+		}
+		used += added;
+	}
+	output[used] = '\0';
+	return 0;
+}
+
+static int format_status(char *buffer, size_t buffer_size)
 {
 	char log_files[80];
+	char version[96];
 	diagnostics_log_files(log_files, sizeof(log_files));
-	snprintk(status_json, sizeof(status_json),
+	if (json_escape(version, sizeof(version), CONFIG_CRASH_LAB_VERSION) != 0) {
+		return -EINVAL;
+	}
+	int length = snprintk(buffer, buffer_size,
 		"{\"build\":\"%s+%s\",\"fingerprint\":\"%s\",\"uptime_ms\":%lld,\"reset_reason\":%u,"
 		"\"dump_pending\":%s,\"dump_size\":%u,\"crash_seq\":%u,"
-		"\"boot_count\":%u,\"event_count\":%u,\"log_files\":%s}",
-		CONFIG_CRASH_LAB_VERSION, CRASH_LAB_GIT_SHA, CRASH_LAB_FINGERPRINT, k_uptime_get(),
+		"\"boot_count\":%u,\"event_count\":%u,\"unsafe_commands\":%s,\"log_files\":%s}",
+		version, CRASH_LAB_GIT_SHA, CRASH_LAB_FINGERPRINT, k_uptime_get(),
 		dump_store_reset_reason(), dump_store_pending() ? "true" : "false",
 		(unsigned int)dump_store_size(), dump_store_sequence(),
-		diagnostics_boot_count(), diagnostics_event_count(), log_files);
+		diagnostics_boot_count(), diagnostics_event_count(),
+		IS_ENABLED(CONFIG_CRASH_LAB_UNSAFE_BLE_COMMANDS) ? "true" : "false", log_files);
+	return length < 0 || (size_t)length >= buffer_size ? -ENOSPC : length;
 }
 
 static ssize_t read_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			   void *buf, uint16_t len, uint16_t offset)
 {
 	ARG_UNUSED(attr);
-	update_status();
+	/* Freeze one JSON value for all offset reads in this ATT long-read. */
+	if (offset == 0 && format_status(status_json, sizeof(status_json)) < 0) {
+		return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+	}
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, status_json, strlen(status_json));
 }
 
@@ -92,6 +129,9 @@ static ssize_t write_command(struct bt_conn *conn, const struct bt_gatt_attr *at
 	ARG_UNUSED(conn);
 	ARG_UNUSED(attr);
 	ARG_UNUSED(flags);
+	if (!IS_ENABLED(CONFIG_CRASH_LAB_UNSAFE_BLE_COMMANDS)) {
+		return BT_GATT_ERR(BT_ATT_ERR_AUTHORIZATION);
+	}
 	if (offset != 0 || len != 1) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
@@ -121,9 +161,52 @@ BT_GATT_SERVICE_DEFINE(crash_service,
 
 void dummy_ble_status_changed(void)
 {
-	update_status();
-	(void)bt_gatt_notify(NULL, &crash_service.attrs[4], status_json, strlen(status_json));
+	char notification[sizeof(status_json)];
+	int length = format_status(notification, sizeof(notification));
+	if (length >= 0) {
+		(void)bt_gatt_notify(NULL, &crash_service.attrs[4], notification, length);
+	}
 }
+
+static bool diagnostic_path(const char *filename)
+{
+	if (strcmp(filename, "/lfs/crash.bin") == 0 ||
+	    strcmp(filename, "/lfs/meta.txt") == 0 ||
+	    strcmp(filename, "/lfs/recent.log") == 0 ||
+	    strcmp(filename, "/lfs/events.ndjson") == 0) {
+		return true;
+	}
+	return strncmp(filename, "/lfs/zephyr.", 12) == 0 && strlen(filename) == 16 &&
+		filename[12] >= '0' && filename[12] <= '9' &&
+		filename[13] >= '0' && filename[13] <= '9' &&
+		filename[14] >= '0' && filename[14] <= '9' &&
+		filename[15] >= '0' && filename[15] <= '9';
+}
+
+static enum mgmt_cb_return fs_access(uint32_t event, enum mgmt_cb_return previous,
+				     int32_t *rc, uint16_t *group, bool *abort_more,
+				     void *data, size_t data_size)
+{
+	ARG_UNUSED(group);
+	if (event == MGMT_EVT_OP_FS_MGMT_FILE_ACCESS && previous == MGMT_CB_OK &&
+	    data_size == sizeof(struct fs_mgmt_file_access)) {
+		struct fs_mgmt_file_access *access = data;
+		if ((access->access == FS_MGMT_FILE_ACCESS_READ ||
+		     access->access == FS_MGMT_FILE_ACCESS_STATUS) &&
+		    diagnostic_path(access->filename)) {
+			return MGMT_CB_OK;
+		}
+		*rc = MGMT_ERR_EACCESSDENIED;
+		*abort_more = true;
+		return MGMT_CB_ERROR_RC;
+	}
+	return MGMT_CB_OK;
+}
+
+static struct mgmt_callback fs_access_callback = {
+	.callback = fs_access,
+	.event_id = MGMT_EVT_OP_FS_MGMT_FILE_ACCESS,
+};
 
 static const struct bt_data advertising[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
@@ -182,6 +265,8 @@ int dummy_ble_init(void)
 {
 	k_work_init(&command_work, command_work_handler);
 	k_work_init(&advertise_work, advertise_work_handler);
+	mgmt_callback_register(&fs_access_callback);
+	(void)format_status(status_json, sizeof(status_json));
 	int ret = bt_enable(NULL);
 	if (ret != 0) {
 		LOG_ERR("Bluetooth enable failed: %d", ret);

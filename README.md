@@ -1,13 +1,17 @@
 # Open Zephyr diagnostics: SDK, gateway, service, DK lab
 
+> **Experimental reference implementation.** Suitable for development and
+> evaluation, not unattended production fleets. Read [Security](SECURITY.md)
+> and [known limitations](docs/ARCHITECTURE.md#known-limitations).
+
 This repository now has three reusable pieces:
 
 1. [`sdk/zephyr/`](sdk/zephyr/) — installable Cortex-M Zephyr module for
    persistent PC-bearing events, reboot count and health metrics.
 2. [`host/pull_crash.py`](host/pull_crash.py) — BLE MCUmgr gateway that archives
    the precise ELF and optionally uploads raw evidence.
-3. [`service/`](service/) — self-hosted API and browser UI that independently
-   verifies the ELF and diagnoses crashes/events/logs.
+3. [`service/`](service/) — self-hosted API and browser UI that checks archive
+   consistency and diagnoses crashes/events/logs. It does not attest devices.
 
 Start with [Zephyr installation](docs/INSTALL_ZEPHYR.md),
 [service setup/API](docs/SERVICE.md), and [architecture/feature boundary](docs/ARCHITECTURE.md).
@@ -64,7 +68,7 @@ management is unsupported. `logs` works even without a dump.
 | --- | ---: | ---: |
 | Application | `0x00000` | 768 KiB |
 | LittleFS | `0xC0000` | 192 KiB |
-| Fault-safe Zephyr coredump | `0xF0000` | 64 KiB |
+| Best-effort fault-context coredump | `0xF0000` | 64 KiB |
 
 An intentional fault enters Zephyr's coredump core. `src/flash_coredump.c`
 commits the raw binary dump to the dedicated partition with synchronous NVMC
@@ -78,8 +82,9 @@ ELF** under `host/out/<UTC timestamp>/`, with a SHA-256 manifest.
 
 ## Diagnostics and ELF attribution
 
-- Each boot records the reset-cause flag and a persistent boot count. Fatal
-  faults also retain CPU registers and the full GDB backtrace.
+- Each boot records the reset-cause flag and a best-effort persistent boot
+  count. Fatal faults retain CPU registers; a later GDB backtrace is available
+  only when compatible GDB and Zephyr scripts are installed.
 - Real BLE connection/disconnection events and application errors go into
   `/lfs/events.ndjson` with code, value, uptime, boot number, build fingerprint
   and **caller PC**. A periodic health event records unused system-workqueue
@@ -125,10 +130,11 @@ was flashed, so record the flashed ELF SHA-256 in your lab notebook. The
 
 ## Important limitations
 
-- This is deliberately **not** a secure or production-ready BLE service. SMP
-  filesystem access and crash commands are unauthenticated; do not put secrets
-  in this lab image. There is no OTA updater/MCUboot, and unsupported image
-  management requests must be rejected.
+- This is deliberately **not** a secure or production-ready BLE service.
+  MCUmgr exposes only allowlisted diagnostic reads, but those reads and the
+  explicitly enabled lab crash commands are unauthenticated. Do not put secrets
+  in this image. Derived firmware should leave
+  `CONFIG_CRASH_LAB_UNSAFE_BLE_COMMANDS=n` and add authenticated transport.
 - Zephyr's standard flash-partition coredump backend uses the nRF flash driver,
   which takes `k_sem_take(K_FOREVER)` during the Cortex-M fault. With assertions
   enabled this causes a second exception. This lab's fault-only backend uses

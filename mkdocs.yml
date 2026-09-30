@@ -1,0 +1,20 @@
+site_name: Open Zephyr Diagnostics
+site_description: Experimental Zephyr Cortex-M diagnostics SDK, gateway and self-hosted service
+repo_url: https://github.com/rudr-phi9/nrf5340-crash-ble-lab
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - Architecture: ARCHITECTURE.md
+  - Zephyr SDK: INSTALL_ZEPHYR.md
+  - Gateway: GATEWAY.md
+  - nRF5340 Reference: NRF5340_REFERENCE.md
+  - Backend Service: SERVICE.md
+  - Testing: TESTING.md
+  - Troubleshooting: TROUBLESHOOTING.md
+  - Roadmap: ROADMAP.md
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true

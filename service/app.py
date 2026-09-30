@@ -18,6 +18,7 @@ import zipfile
 import zlib
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse
 
 from .analysis import analyze_crash, analyze_events, elf_sections, verify_elf
@@ -25,6 +26,8 @@ from .analysis import analyze_crash, analyze_events, elf_sections, verify_elf
 MAX_UPLOAD = 20 * 1024 * 1024
 MAX_ELF = 16 * 1024 * 1024
 MAX_DUMP = 65536
+MAX_LOG_LINES = 10000
+MAX_LOG_LINE = 4096
 LOG_FILE = re.compile(r"zephyr\.\d{4}")
 LOG_LINE = re.compile(r"^\[(?P<timestamp>[^]]+)]\s+<(?P<level>[^>]+)>\s+"
                       r"(?P<module>[^:]+):\s*(?P<message>.*)$")
@@ -88,7 +91,15 @@ def _logs(files: dict[str, bytes]) -> list[dict]:
     for name in sorted(files):
         if not LOG_FILE.fullmatch(name):
             continue
-        for text in files[name].decode("utf-8", errors="replace").splitlines():
+        for raw in BytesIO(files[name]):
+            if len(entries) >= MAX_LOG_LINES:
+                raise ValueError(f"Log line count exceeds {MAX_LOG_LINES}")
+            raw = raw.rstrip(b"\r\n")
+            if not raw:
+                continue
+            if len(raw) > MAX_LOG_LINE:
+                raise ValueError(f"Log line exceeds {MAX_LOG_LINE} bytes")
+            text = raw.decode("utf-8", errors="replace")
             match = LOG_LINE.match(text)
             entries.append({"file": name, "timestamp": match["timestamp"] if match else None,
                             "level": match["level"] if match else None,
@@ -128,8 +139,11 @@ def _prepare(files: dict[str, bytes], folder: Path) -> tuple[dict, list[dict], l
         issue_key = None
         if crash:
             # Group the same reason/function across firmware releases.
+            location = crash["lr_call_site"] if "via " in crash["explanation"] else crash["pc"]
+            source = Path(location["file"]).parts[-2:] if location.get("file") else ()
             issue_key = hashlib.sha256(
-                f"{crash['reason']}:{crash['issue_function']}".encode()).hexdigest()[:20]
+                f"arm:{crash['reason']}:{'/'.join(source)}:{crash['issue_function']}".encode()
+            ).hexdigest()[:20]
         report = {"device": device, "fingerprint": fingerprint, "build": build,
                   "elf_sha": elf_sha, "dump_sha": dump_sha,
                   "created": datetime.now(timezone.utc).isoformat(),
@@ -203,14 +217,14 @@ def create_app(data_dir: str | Path | None = None, token: str | None = None) -> 
             if existing:
                 return {"id": existing["id"], "duplicate": True}
         try:
-            files = _archive_files(bytes(content))
+            files = await run_in_threadpool(_archive_files, bytes(content))
             report_id = uuid.uuid4().hex
             folder = data / "reports" / report_id
             folder.mkdir(mode=0o700)
             try:
                 for name, body in files.items():
                     (folder / name).write_bytes(body)
-                report, events, logs = _prepare(files, folder)
+                report, events, logs = await run_in_threadpool(_prepare, files, folder)
                 with db() as connection:
                     connection.execute(
                         "INSERT INTO reports (id,upload_sha,device,fingerprint,build,elf_sha,dump_sha,"
@@ -229,6 +243,14 @@ def create_app(data_dir: str | Path | None = None, token: str | None = None) -> 
             except Exception:
                 shutil.rmtree(folder)  # Only the newly allocated UUID folder.
                 raise
+        except sqlite3.IntegrityError:
+            with db() as connection:
+                existing = connection.execute(
+                    "SELECT id FROM reports WHERE upload_sha=?", (upload_sha,)
+                ).fetchone()
+            if existing:
+                return {"id": existing["id"], "duplicate": True}
+            raise HTTPException(409, "Concurrent report insertion conflict")
         except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
         return {"id": report_id, "duplicate": False, "issue_key": report["issue_key"],
