@@ -113,4 +113,4 @@ python3 -m unittest discover -s host/tests -q
 The API tests check auth, malicious ZIP names, missing/mismatched ELF, bad
 dump size, issue grouping, replay/idempotency, XSS escaping, and a real DK
 archive when one is available locally. Hardware proof transcripts are in
-[`LAB.md`](https://github.com/rudr-phi9/nrf5340-crash-ble-lab/blob/lab/nrf5340-crash-ble/LAB.md).
+[`LAB.md`](https://github.com/fitnowhere/nrf5340-crash-ble-lab/blob/main/LAB.md).

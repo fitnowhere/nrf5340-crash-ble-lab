@@ -20,7 +20,7 @@ The reference is validated with a pristine NCS v3.4.0 sysbuild. Hardware is not
 available to GitHub-hosted CI, so compilation does not replace board testing.
 Measured fault, reboot persistence, BLE retrieval and exact source mappings are
 recorded in the repository's
-[`LAB.md`](https://github.com/rudr-phi9/nrf5340-crash-ble-lab/blob/lab/nrf5340-crash-ble/LAB.md),
+[`LAB.md`](https://github.com/fitnowhere/nrf5340-crash-ble-lab/blob/main/LAB.md),
 including firmware fingerprints and caveats.
 
 Before a release, repeat at least: clean flash, status, logs-only upload, each

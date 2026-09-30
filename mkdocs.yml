@@ -1,6 +1,6 @@
 site_name: Open Zephyr Diagnostics
 site_description: Experimental Zephyr Cortex-M diagnostics SDK, gateway and self-hosted service
-repo_url: https://github.com/rudr-phi9/nrf5340-crash-ble-lab
+repo_url: https://github.com/fitnowhere/nrf5340-crash-ble-lab
 theme:
   name: material
 nav:
