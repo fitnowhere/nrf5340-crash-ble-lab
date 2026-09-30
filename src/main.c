@@ -7,7 +7,6 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/logging/log_ctrl.h>
 #include <zephyr/sys/reboot.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
@@ -85,11 +84,6 @@ int main(void)
 	if (ret != 0) {
 		LOG_ERR("Diagnostic journal initialization failed: %d", ret);
 		return ret;
-	}
-	const struct log_backend *fs_backend = log_backend_get_by_name("log_backend_fs");
-	if (fs_backend != NULL) {
-		/* FS access from the logger thread, never from the fault handler. */
-		log_backend_enable(fs_backend, NULL, LOG_LEVEL_WRN);
 	}
 	diagnostics_record("boot", DIAG_BOOT, (int)dump_store_reset_reason());
 	LOG_INF("Boot reset_reason=0x%x", dump_store_reset_reason());

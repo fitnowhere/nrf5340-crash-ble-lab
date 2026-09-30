@@ -1,4 +1,19 @@
-# nRF5340 crash-over-BLE lab
+# Open Zephyr diagnostics: SDK, gateway, service, DK lab
+
+This repository now has three reusable pieces:
+
+1. [`sdk/zephyr/`](sdk/zephyr/) — installable Cortex-M Zephyr module for
+   persistent PC-bearing events, reboot count and health metrics.
+2. [`host/pull_crash.py`](host/pull_crash.py) — BLE MCUmgr gateway that archives
+   the precise ELF and optionally uploads raw evidence.
+3. [`service/`](service/) — self-hosted API and browser UI that independently
+   verifies the ELF and diagnoses crashes/events/logs.
+
+Start with [Zephyr installation](docs/INSTALL_ZEPHYR.md),
+[service setup/API](docs/SERVICE.md), and [architecture/feature boundary](docs/ARCHITECTURE.md).
+The DK example below remains a ready-to-flash end-to-end reference.
+All newly authored SDK/service code is licensed under Apache-2.0; see
+[`LICENSE`](LICENSE).
 
 Standalone Zephyr/NCS v3.4.0 experiment for the **onboard** nRF5340 DK
 (`nrf5340dk/nrf5340/cpuapp`). It does not use or alter product firmware. The

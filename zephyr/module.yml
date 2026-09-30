@@ -1,0 +1,5 @@
+# Allows automatic module discovery when this repository is a west project or
+# its root is listed in ZEPHYR_EXTRA_MODULES.
+build:
+  cmake: sdk/zephyr
+  kconfig: sdk/zephyr/Kconfig

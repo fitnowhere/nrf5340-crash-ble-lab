@@ -1,0 +1,16 @@
+services:
+  diagnostics:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+    environment:
+      DIAG_SERVICE_TOKEN: ${DIAG_SERVICE_TOKEN:?Set a random service token}
+      DIAG_SERVICE_DATA: /data
+      DIAG_ADDR2LINE: arm-none-eabi-addr2line
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - diagnostic-data:/data
+
+volumes:
+  diagnostic-data:

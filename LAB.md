@@ -211,3 +211,35 @@ $ python3 host/pull_crash.py status
 The ELF and event files for these measurements are in the Git-ignored
 `host/out/` folders above. Rebuilds after documentation commits receive a new
 fingerprint; replay the saved dumps with each folder's archived `zephyr.elf`.
+
+## Reusable SDK and service validation
+
+The diagnostic implementation was subsequently extracted to the discoverable
+Zephyr module at `sdk/zephyr/`; a pristine nRF5340 sysbuild completed with no
+warnings and exported `diag_sdk_start`, `diag_sdk_record`, status, and log-file
+enumeration symbols. The extracted module was flashed and a live logs-only
+BLE collection uploaded directly to a fresh local service instance:
+
+```text
+Uploaded report bf2b54775d44485b93379191c4d55948 (issue=None)
+device: B08D17D4-7714-3351-C3A4-A0444837A460
+fingerprint: 6d733011fecd970e2134
+event_count: 104
+log_count: 270
+```
+
+An earlier real divide-by-zero archive was also uploaded through the gateway;
+the server independently validated its ELF and returned:
+
+```text
+reason: Divide-by-zero UsageFault at crash_div_by_zero
+issue: 7e1948b682dbe600379c
+events: 64
+logs: 205
+```
+
+Service tests use the real null/div0/assert/log-only DK archives when present
+and cover authentication, invalid ZIP paths, wrong ELF/build ID, wrong dump
+size, issue grouping, idempotent replay, and HTML escaping. Compose syntax and
+the installable Python wheel were validated. Docker image execution was not
+tested because Docker Desktop's daemon was not running in this environment.

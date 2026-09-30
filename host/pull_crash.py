@@ -5,6 +5,7 @@ import argparse
 import asyncio
 from datetime import datetime, timezone
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,10 @@ import shutil
 import struct
 import subprocess
 import sys
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
+import zipfile
 
 SERVICE = "7a4e0001-7b2d-4c19-9a71-1db95c873510"
 COMMAND = "7a4e0002-7b2d-4c19-9a71-1db95c873510"
@@ -24,6 +29,8 @@ SAMPLES = {"recoverable": 0x20, "ble_failure": 0x21,
            "storage_failure": 0x22, "ota_rejected": 0x23}
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ELF = ROOT / "build" / "nrf5340-crash-ble-lab" / "zephyr" / "zephyr.elf"
+UPLOAD_FILES = {"manifest.json", "zephyr.elf", "crash.bin", "meta.txt",
+                "events.ndjson", "recent.log"}
 
 
 def find_zephyr_tool(name: str) -> str:
@@ -82,6 +89,37 @@ def record_host_failure(folder: Path, device, status: dict, exc: Exception):
         "error_type": type(exc).__name__, "error": str(exc),
         "time_utc": datetime.now(timezone.utc).isoformat(),
     }, indent=2) + "\n")
+
+
+def upload_archive(folder: Path, server_url: str, token: str) -> dict:
+    """Upload only raw evidence. Server independently re-verifies ELF/dump."""
+    target = urlsplit(server_url)
+    if target.scheme not in {"http", "https"} or not target.netloc:
+        raise ValueError("Server URL must be http(s)://host:port")
+    if target.scheme == "http" and target.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError("Use HTTPS when uploading to a non-local server")
+    if not token:
+        raise ValueError("Server upload requires --api-token or DIAG_SERVICE_TOKEN")
+    if not (folder / "manifest.json").is_file() or not (folder / "zephyr.elf").is_file():
+        raise ValueError("Archive must include a manifest and unstripped ELF")
+    bundle = BytesIO()
+    with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for file in sorted(folder.iterdir()):
+            if file.name in UPLOAD_FILES or re.fullmatch(r"zephyr\.\d{4}", file.name):
+                archive.write(file, arcname=file.name)
+    request = Request(server_url.rstrip("/") + "/api/v1/reports", bundle.getvalue(),
+                      {"Content-Type": "application/zip",
+                       "Authorization": f"Bearer {token}"}, method="POST")
+    try:
+        with urlopen(request, timeout=75) as response:
+            result = json.load(response)
+    except HTTPError as exc:
+        raise RuntimeError(f"Diagnostic server rejected archive ({exc.code}): "
+                           f"{exc.read(500).decode(errors='replace')}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Diagnostic server unavailable: {exc}") from exc
+    print(f"Uploaded report {result['id']} (issue={result.get('issue_key')})")
+    return result
 
 
 def validate_elf(elf: Path, meta: dict):
@@ -265,7 +303,8 @@ async def command(device, value: int):
     return status
 
 
-async def pull(device, elf: Path, tool: str, skip_symbolicate: bool):
+async def pull(device, elf: Path, tool: str, skip_symbolicate: bool,
+               server_url: str | None = None, token: str = ""):
     from smpclient import SMPClient
     from smpclient.transport.ble import SMPBLETransport
 
@@ -295,6 +334,8 @@ async def pull(device, elf: Path, tool: str, skip_symbolicate: bool):
     (folder / "manifest.json").write_text(json.dumps({"device": device.address,
         "elf_sha256": digest, "status": status}, indent=2) + "\n")
     print(f"Archived matching unstripped app ELF: {folder / 'zephyr.elf'}")
+    if server_url:
+        upload_archive(folder, server_url, token)
     if not skip_symbolicate:
         result = symbolicate(folder / "crash.bin", folder / "zephyr.elf", tool)
         (folder / "symbolication.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -302,7 +343,8 @@ async def pull(device, elf: Path, tool: str, skip_symbolicate: bool):
     return folder
 
 
-async def logs(device, elf: Path, tool: str):
+async def logs(device, elf: Path, tool: str, server_url: str | None = None,
+               token: str = ""):
     from smpclient import SMPClient
     from smpclient.transport.ble import SMPBLETransport
 
@@ -318,6 +360,8 @@ async def logs(device, elf: Path, tool: str):
     shutil.copy2(elf, folder / "zephyr.elf")
     (folder / "manifest.json").write_text(json.dumps({"device": device.address,
         "elf_sha256": digest, "status": status}, indent=2) + "\n")
+    if server_url:
+        upload_archive(folder, server_url, token)
     decode_events(folder, folder / "zephyr.elf", tool, status["fingerprint"])
     print(f"Saved diagnostics to {folder}")
 
@@ -333,6 +377,11 @@ async def main(args):
         elf = args.elf or args.folder / "zephyr.elf"
         manifest = json.loads((args.folder / "manifest.json").read_text())
         decode_events(args.folder, elf, args.addr2line, manifest["status"]["fingerprint"])
+        return
+    if args.action == "upload":
+        if not args.server_url:
+            raise ValueError("Set --server-url or DIAG_SERVICE_URL before upload")
+        upload_archive(args.folder, args.server_url, args.api_token)
         return
     if args.action == "scan":
         await scan(args.timeout, args.all)
@@ -350,9 +399,11 @@ async def main(args):
         await command(device, 0xFE)
         print("Requested deletion of archived dump on device")
     elif args.action == "pull":
-        await pull(device, args.elf or DEFAULT_ELF, args.addr2line, args.skip_symbolicate)
+        await pull(device, args.elf or DEFAULT_ELF, args.addr2line, args.skip_symbolicate,
+                   args.server_url, args.api_token)
     elif args.action == "logs":
-        await logs(device, args.elf or DEFAULT_ELF, args.addr2line)
+        await logs(device, args.elf or DEFAULT_ELF, args.addr2line,
+                   args.server_url, args.api_token)
     elif args.action == "emit":
         await command(device, SAMPLES[args.type])
         print(f"Injected synthetic {args.type} diagnostic (not a real failure)")
@@ -375,6 +426,8 @@ if __name__ == "__main__":
     p.add_argument("--timeout", type=float, default=8, help="scan timeout seconds")
     p.add_argument("--elf", type=Path, help="unstripped app-core zephyr.elf (not HCI IPC)")
     p.add_argument("--addr2line", default=default_addr2line())
+    p.add_argument("--server-url", default=os.getenv("DIAG_SERVICE_URL"))
+    p.add_argument("--api-token", default=os.getenv("DIAG_SERVICE_TOKEN", ""))
     actions = p.add_subparsers(dest="action", required=True)
     actions.add_parser("scan").add_argument("--all", action="store_true")
     actions.add_parser("status")
@@ -392,6 +445,8 @@ if __name__ == "__main__":
     sym.add_argument("dump", type=Path, help="host/out/<timestamp>/crash.bin")
     dec = actions.add_parser("decode-events")
     dec.add_argument("folder", type=Path, help="host/out/<timestamp> with manifest.json")
+    up = actions.add_parser("upload")
+    up.add_argument("folder", type=Path, help="host/out/<timestamp> containing raw evidence and ELF")
     args = p.parse_args()
     try:
         asyncio.run(main(args))

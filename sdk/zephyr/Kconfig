@@ -1,0 +1,31 @@
+menuconfig DIAG_SDK
+	bool "Persistent diagnostic events for Zephyr"
+	depends on ARM && CPU_CORTEX_M && FILE_SYSTEM && LOG && INIT_STACKS && THREAD_STACK_INFO
+	help
+	  Collect build-tagged recoverable events, reset/boot metadata and
+	  periodic stack health metrics on an already mounted file system.
+	  It does not provide a flash driver, a BLE transport, or an OTA client.
+
+if DIAG_SDK
+
+config DIAG_SDK_MOUNT_POINT
+	string "Mounted filesystem path"
+	default "/lfs"
+	help
+	  The application must mount the filesystem before diag_sdk_start().
+
+config DIAG_SDK_LOG_FILE_PREFIX
+	string "Zephyr filesystem logger filename prefix"
+	default "zephyr."
+
+config DIAG_SDK_METRICS_INTERVAL_SECONDS
+	int "Health sample interval in seconds"
+	default 60
+	range 10 3600
+
+config DIAG_SDK_MAX_EVENTS_BYTES
+	int "Maximum diagnostic event journal size before rotation"
+	default 24576
+	range 4096 131072
+
+endif

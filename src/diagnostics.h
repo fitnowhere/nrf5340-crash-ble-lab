@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "build_id.h"
+#include <diag_sdk/diag_sdk.h>
 
 /* Code IDs are stable across rebuilds; injection IDs are deliberately separate. */
 enum diag_code {
@@ -21,14 +23,21 @@ enum diag_code {
 	DIAG_INJECT_OTA_REJECTED = 103,
 };
 
-int diagnostics_init(void);
-uint32_t diagnostics_boot_count(void);
-uint32_t diagnostics_event_count(void);
-void diagnostics_log_files(char *buffer, size_t length);
+#define diagnostics_init() diag_sdk_start(CRASH_LAB_FINGERPRINT)
+#define diagnostics_boot_count diag_sdk_boot_count
+#define diagnostics_event_count diag_sdk_event_count
+#define diagnostics_log_files diag_sdk_log_files
 
 /* NOINLINE: return address belongs to the caller, not this function. In
  * addr2line/GDB subtract one byte from the return PC to get the call site.
  * Only use from thread context after the filesystem has been mounted. */
-void diagnostics_record(const char *category, enum diag_code code, int value);
+#define DIAGNOSTICS_LEVEL(_code) \
+	(((_code) == DIAG_BOOT || (_code) == DIAG_BLE_CONNECTED || \
+	  (_code) == DIAG_BLE_DISCONNECTED || (_code) == DIAG_HEARTBEAT) ? \
+	 DIAG_SDK_LEVEL_INFO : \
+	 (((_code) == DIAG_CRASH_ARMED || (_code) >= DIAG_INJECT_RECOVERABLE) ? \
+	  DIAG_SDK_LEVEL_WARNING : DIAG_SDK_LEVEL_ERROR))
+#define diagnostics_record(_category, _code, _value) \
+	diag_sdk_record(DIAGNOSTICS_LEVEL(_code), (_category), (_code), (_value))
 
 #endif

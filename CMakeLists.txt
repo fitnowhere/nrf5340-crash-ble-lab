@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20.0)
 
+list(APPEND ZEPHYR_EXTRA_MODULES "${CMAKE_CURRENT_SOURCE_DIR}")
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(nrf5340_crash_ble_lab)
 
@@ -40,7 +41,10 @@ endforeach()
 set(CRASH_LAB_INPUTS CMakeLists.txt Kconfig prj.conf sysbuild.conf
   boards/nrf5340dk_nrf5340_cpuapp.overlay
   src/main.c src/crashes.c src/dummy_ble.c src/dump_store.c src/flash_coredump.c
-  src/diagnostics.c src/crashes.h src/dummy_ble.h src/dump_store.h src/diagnostics.h)
+  src/crashes.h src/dummy_ble.h src/dump_store.h src/diagnostics.h
+  sdk/zephyr/src/diag_sdk.c sdk/zephyr/include/diag_sdk/diag_sdk.h
+  sdk/zephyr/Kconfig sdk/zephyr/CMakeLists.txt sdk/zephyr/zephyr/module.yml
+  zephyr/module.yml)
 set(CRASH_LAB_FINGERPRINT "git:${CRASH_LAB_GIT_SHA}\n")
 foreach(input IN LISTS CRASH_LAB_INPUTS)
   # A source edit must reconfigure, not just recompile: otherwise a different
@@ -66,7 +70,6 @@ target_sources(app PRIVATE
   src/dummy_ble.c
   src/dump_store.c
   src/flash_coredump.c
-  src/diagnostics.c
 )
 
 # Preserve usable Cortex-M call frames in the unstripped ELF.
