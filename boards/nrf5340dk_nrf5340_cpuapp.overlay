@@ -1,0 +1,37 @@
+/ {
+	chosen {
+		zephyr,code-partition = &app_partition;
+	};
+};
+
+/* Replace MCUboot-oriented defaults with a simple lab layout:
+ * 0x00000..0xbffff app       (768 KiB)
+ * 0xc0000..0xeffff littlefs  (192 KiB)
+ * 0xf0000..0xfffff coredump  ( 64 KiB)
+ */
+/delete-node/ &boot_partition;
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+/delete-node/ &storage_partition;
+
+&flash0 {
+	partitions {
+		app_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			label = "crash-lab-app";
+			reg = <0x00000000 0x000c0000>;
+		};
+
+		storage_partition: partition@c0000 {
+			compatible = "zephyr,mapped-partition";
+			label = "storage";
+			reg = <0x000c0000 0x00030000>;
+		};
+
+		coredump_partition: partition@f0000 {
+			compatible = "zephyr,mapped-partition";
+			label = "coredump-partition";
+			reg = <0x000f0000 0x00010000>;
+		};
+	};
+};

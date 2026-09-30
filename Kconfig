@@ -1,0 +1,31 @@
+mainmenu "nRF5340 crash-over-BLE lab"
+
+source "Kconfig.zephyr"
+
+menu "Crash lab"
+
+config CRASH_LAB_VERSION
+	string "Build identifier"
+	default "lab-1"
+	help
+	  Human-readable identifier embedded in firmware and dump metadata.
+
+config CRASH_LAB_AUTO_CRASH
+	bool "Enable periodic random crashes"
+	default n
+	help
+	  Keep disabled for first bring-up so BLE remains reachable.
+
+config CRASH_LAB_AUTO_CRASH_SECONDS
+	int "Seconds between automatic crashes"
+	default 60
+	range 10 3600
+	depends on CRASH_LAB_AUTO_CRASH
+
+config CRASH_LAB_STACK_SMASH
+	bool "Enable optional stack-smash crash type"
+	default n
+	help
+	  Adds crash type 4. Types 0..3 are always available.
+
+endmenu
