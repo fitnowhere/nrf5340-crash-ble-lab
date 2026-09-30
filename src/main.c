@@ -2,10 +2,12 @@
 #include "crashes.h"
 #include "dummy_ble.h"
 #include "dump_store.h"
+#include "diagnostics.h"
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/logging/log_ctrl.h>
 #include <zephyr/sys/reboot.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
@@ -24,7 +26,10 @@ static void button_crash_handler(struct k_work *work)
 	uint8_t count = IS_ENABLED(CONFIG_CRASH_LAB_STACK_SMASH) ? 5 : 4;
 	uint8_t type = next_button_crash++ % count;
 	LOG_WRN("Button 1 selected crash type %u (%s)", type, crash_type_name(type));
-	(void)crash_schedule(type);
+	int ret = crash_schedule(type);
+	if (ret != 0) {
+		diagnostics_record("button", DIAG_BUTTON_FAILED, ret);
+	}
 }
 
 static void button_reboot_handler(struct k_work *work)
@@ -76,6 +81,17 @@ int main(void)
 		LOG_ERR("Dump storage initialization failed: %d", ret);
 		return ret;
 	}
+	ret = diagnostics_init();
+	if (ret != 0) {
+		LOG_ERR("Diagnostic journal initialization failed: %d", ret);
+		return ret;
+	}
+	const struct log_backend *fs_backend = log_backend_get_by_name("log_backend_fs");
+	if (fs_backend != NULL) {
+		/* FS access from the logger thread, never from the fault handler. */
+		log_backend_enable(fs_backend, NULL, LOG_LEVEL_WRN);
+	}
+	diagnostics_record("boot", DIAG_BOOT, (int)dump_store_reset_reason());
 	LOG_INF("Boot reset_reason=0x%x", dump_store_reset_reason());
 	dump_store_note("boot build=%s+%s reset=0x%x", CONFIG_CRASH_LAB_VERSION,
 		CRASH_LAB_GIT_SHA, dump_store_reset_reason());
@@ -84,6 +100,7 @@ int main(void)
 	ret = buttons_init();
 	if (ret != 0) {
 		LOG_ERR("Buttons unavailable: %d", ret);
+		diagnostics_record("button", DIAG_BUTTON_FAILED, ret);
 	}
 	ret = dummy_ble_init();
 	if (ret != 0) {

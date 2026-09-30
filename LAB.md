@@ -126,7 +126,7 @@ The lab is intentionally unauthenticated and unsuitable for production deploymen
 Avoid mass erase if retaining the local flash evidence matters. The Git-ignored
 `host/out/` archives are the authoritative binaries for the above measurements.
 
-## Final image recheck
+## Earlier crash-only image recheck
 
 After cleanup, pristine sysbuild succeeded, both images still resolved, six
 offline `unittest` checks passed, and app-core-only programming verified.
@@ -146,4 +146,5 @@ $ python3 host/pull_crash.py status
 "reset_reason": 2, "dump_pending": true, "dump_size": 1060, "crash_seq": 7
 ```
 
-This leaves the DK advertising with a valid archived dump for further testing.
+This measured image left the DK advertising with a valid archived dump for
+further testing; newer builds have their own ELF fingerprint.

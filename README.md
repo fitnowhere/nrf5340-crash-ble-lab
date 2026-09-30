@@ -22,6 +22,7 @@ python3 -m venv .venv
 .venv/bin/python host/pull_crash.py crash null
 # After the device reboots and advertises again:
 .venv/bin/python host/pull_crash.py pull
+.venv/bin/python host/pull_crash.py logs
 ```
 
 If the SDK tool binaries are not on `PATH`, add
@@ -36,6 +37,11 @@ Crash commands: `null`, `div0`, `assert`, `fnptr`; optional `stack` with
 does a clean reboot. `reboot` and `clear` are also host commands. Automatic
 random crashes are **off** by default; opt in using
 `CONFIG_CRASH_LAB_AUTO_CRASH=y` and `CONFIG_CRASH_LAB_AUTO_CRASH_SECONDS`.
+For recoverable *examples* (clearly marked synthetic), run
+`python3 host/pull_crash.py emit recoverable` or choose `ble_failure`,
+`storage_failure`, `ota_rejected`; then `python3 host/pull_crash.py logs`.
+`python3 host/pull_crash.py ota-check` checks that real MCUmgr image
+management is unsupported. `logs` works even without a dump.
 
 ## Data path
 
@@ -54,6 +60,36 @@ records the armed crash and boots. A failed copy leaves the flash copy intact.
 MCUmgr SMP over BLE serves the files; custom GATT handles crash commands and
 JSON status. The host saves all three files and the **matching unstripped app
 ELF** under `host/out/<UTC timestamp>/`, with a SHA-256 manifest.
+
+## Diagnostics and ELF attribution
+
+- Each boot records the reset-cause flag and a persistent boot count. Fatal
+  faults also retain CPU registers and the full GDB backtrace.
+- Real BLE connection/disconnection events and application errors go into
+  `/lfs/events.ndjson` with code, value, uptime, boot number, build fingerprint
+  and **caller PC**. A periodic health event records unused system-workqueue
+  stack bytes (default every 60 seconds). Synthetic sample events use IDs
+  100–103 and are never presented as actual failures.
+- Zephyr's filesystem log backend saves kernel, Bluetooth and application
+  messages in bounded `/lfs/zephyr.####` text files (four 8-KiB files). These
+  retain timestamp, module and severity. A plain text log line does **not**
+  contain a caller PC: instrument a recoverable error path with
+  `diagnostics_record()` if it needs exact ELF file/line attribution.
+- `logs` fetches the above data independently; `pull` includes it with a crash.
+  Both archive the unstripped ELF. The host resolves event PCs only against
+  an ELF whose source/config/commit fingerprint matches each event, printing
+  function, file, line and ELF section. Old-build events remain visible but
+  **are not** symbolicated with a newer ELF. Offline replay:
+  `python3 host/pull_crash.py decode-events host/out/<timestamp>`.
+- BLE/SMP transfer errors during a pull save `host_failure.json` alongside any
+  partial files. Those are host-side errors and have no device PC.
+
+This is a local Memfault-*style* diagnostic pipeline, **not** the Memfault SDK
+or full cloud feature parity. It cannot derive a code line for arbitrary text
+logs, capture faults that block flash writes, infer heap leaks or battery
+health, upload to a cloud service or perform OTA. New subsystems need their
+own instrumented events and metrics; synthetic failures are not proof of
+hardware faults.
 
 `pull` verifies firmware status, archive metadata, coredump size, and the
 source/config fingerprint embedded in the ELF. It then runs Zephyr's

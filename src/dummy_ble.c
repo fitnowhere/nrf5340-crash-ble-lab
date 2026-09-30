@@ -1,6 +1,7 @@
 #include "dummy_ble.h"
 #include "crashes.h"
 #include "dump_store.h"
+#include "diagnostics.h"
 #include "build_id.h"
 
 #include <errno.h>
@@ -26,16 +27,20 @@ static struct bt_uuid_128 status_uuid = BT_UUID_INIT_128(CRASH_STATUS_UUID);
 static uint8_t pending_command;
 static struct k_work command_work;
 static struct k_work advertise_work;
-static char status_json[192];
+static char status_json[384];
 
 static void update_status(void)
 {
+	char log_files[80];
+	diagnostics_log_files(log_files, sizeof(log_files));
 	snprintk(status_json, sizeof(status_json),
 		"{\"build\":\"%s+%s\",\"fingerprint\":\"%s\",\"uptime_ms\":%lld,\"reset_reason\":%u,"
-		"\"dump_pending\":%s,\"dump_size\":%u,\"crash_seq\":%u}",
+		"\"dump_pending\":%s,\"dump_size\":%u,\"crash_seq\":%u,"
+		"\"boot_count\":%u,\"event_count\":%u,\"log_files\":%s}",
 		CONFIG_CRASH_LAB_VERSION, CRASH_LAB_GIT_SHA, CRASH_LAB_FINGERPRINT, k_uptime_get(),
 		dump_store_reset_reason(), dump_store_pending() ? "true" : "false",
-		(unsigned int)dump_store_size(), dump_store_sequence());
+		(unsigned int)dump_store_size(), dump_store_sequence(),
+		diagnostics_boot_count(), diagnostics_event_count(), log_files);
 }
 
 static ssize_t read_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -55,6 +60,7 @@ static void command_work_handler(struct k_work *work)
 		int ret = crash_schedule(command);
 		if (ret != 0) {
 			LOG_ERR("Crash schedule failed: %d", ret);
+			diagnostics_record("command", DIAG_COMMAND_FAILED, ret);
 		}
 	} else if (command == 0x10) {
 		dump_store_note("clean reboot requested over BLE");
@@ -64,7 +70,19 @@ static void command_work_handler(struct k_work *work)
 	} else if (command == 0xfe) {
 		int ret = dump_store_clear();
 		LOG_INF("Dump clear result: %d", ret);
+		if (ret != 0) {
+			diagnostics_record("storage", DIAG_COMMAND_FAILED, ret);
+		}
 		dummy_ble_status_changed();
+	} else if (command >= 0x20 && command <= 0x23) {
+		/* Sample recoverable paths, not claims of real hardware failures. */
+		static const enum diag_code cases[] = {
+			DIAG_INJECT_RECOVERABLE, DIAG_INJECT_BLE_FAILURE,
+			DIAG_INJECT_STORAGE_FAILURE, DIAG_INJECT_OTA_REJECTED,
+		};
+		diagnostics_record("simulated", cases[command - 0x20], -EIO);
+		LOG_WRN("Synthetic diagnostic %u (not a hardware failure)",
+			(unsigned int)cases[command - 0x20]);
 	}
 }
 
@@ -79,7 +97,9 @@ static ssize_t write_command(struct bt_conn *conn, const struct bt_gatt_attr *at
 	}
 	uint8_t command = *(const uint8_t *)buf;
 	if (command > (IS_ENABLED(CONFIG_CRASH_LAB_STACK_SMASH) ? 4 : 3) &&
-	    command != 0x10 && command != 0xfe) {
+	    command != 0x10 && command != 0xfe &&
+	    (command < 0x20 || command > 0x23)) {
+		diagnostics_record("command", DIAG_COMMAND_FAILED, -EINVAL);
 		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 	}
 	if (k_work_busy_get(&command_work) != 0) {
@@ -121,6 +141,7 @@ static void start_advertising(void)
 		ARRAY_SIZE(advertising), scan_response, ARRAY_SIZE(scan_response));
 	if (ret != 0 && ret != -EALREADY) {
 		LOG_ERR("Advertising failed: %d", ret);
+		diagnostics_record("ble", DIAG_BLE_START_FAILED, ret);
 	} else {
 		LOG_INF("advertising crash-lab");
 	}
@@ -136,12 +157,14 @@ static void connected(struct bt_conn *conn, uint8_t err)
 {
 	ARG_UNUSED(conn);
 	LOG_INF("BLE connected, err=%u", err);
+	diagnostics_record("ble", DIAG_BLE_CONNECTED, err);
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	ARG_UNUSED(conn);
 	LOG_INF("BLE disconnected, reason=%u", reason);
+	diagnostics_record("ble", DIAG_BLE_DISCONNECTED, reason);
 }
 
 static void recycled(void)
@@ -162,6 +185,7 @@ int dummy_ble_init(void)
 	int ret = bt_enable(NULL);
 	if (ret != 0) {
 		LOG_ERR("Bluetooth enable failed: %d", ret);
+		diagnostics_record("ble", DIAG_BLE_ENABLE_FAILED, ret);
 		return ret;
 	}
 	start_advertising();

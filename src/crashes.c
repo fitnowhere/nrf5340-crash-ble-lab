@@ -1,5 +1,6 @@
 #include "crashes.h"
 #include "dump_store.h"
+#include "diagnostics.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -96,7 +97,6 @@ CRASH_FN static void crash_scheduler_work(struct k_work *work)
 	ARG_UNUSED(work);
 	dump_store_note("dispatch crash=%s", crash_type_name(scheduled_type));
 	printk("CRASHLAB dispatch=%s\n", crash_type_name(scheduled_type));
-	LOG_ERR("CRASHLAB triggering %s", crash_type_name(scheduled_type));
 	crash_dispatch(scheduled_type);
 }
 
@@ -112,8 +112,10 @@ int crash_schedule(uint8_t type)
 	}
 	int ret = dump_store_arm(type);
 	if (ret != 0) {
+		diagnostics_record("storage", DIAG_COMMAND_FAILED, ret);
 		return ret;
 	}
+	diagnostics_record("crash", DIAG_CRASH_ARMED, type);
 	scheduled_type = type;
 	return k_work_submit(&crash_work) < 0 ? -EIO : 0;
 }

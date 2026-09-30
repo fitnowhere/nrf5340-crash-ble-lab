@@ -19,6 +19,9 @@ COMMAND = "7a4e0002-7b2d-4c19-9a71-1db95c873510"
 STATUS = "7a4e0003-7b2d-4c19-9a71-1db95c873510"
 NAMES = {"null": 0, "div0": 1, "assert": 2, "fnptr": 3, "stack": 4}
 FILES = ("meta.txt", "recent.log", "crash.bin")
+DIAGNOSTIC_FILES = ("events.ndjson", "recent.log")
+SAMPLES = {"recoverable": 0x20, "ble_failure": 0x21,
+           "storage_failure": 0x22, "ota_rejected": 0x23}
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ELF = ROOT / "build" / "nrf5340-crash-ble-lab" / "zephyr" / "zephyr.elf"
 
@@ -71,6 +74,14 @@ def archive_dir() -> Path:
         folder = folder.with_name(folder.name + "-" + datetime.now(timezone.utc).strftime("%f"))
     folder.mkdir(parents=True)
     return folder
+
+
+def record_host_failure(folder: Path, device, status: dict, exc: Exception):
+    (folder / "host_failure.json").write_text(json.dumps({
+        "device": device.address, "status_before_transfer": status,
+        "error_type": type(exc).__name__, "error": str(exc),
+        "time_utc": datetime.now(timezone.utc).isoformat(),
+    }, indent=2) + "\n")
 
 
 def validate_elf(elf: Path, meta: dict):
@@ -149,6 +160,68 @@ def symbolicate(dump: Path, elf: Path, addr2line_tool: str) -> dict:
             "elf_sha256": digest, "meta": meta, "gdb_backtrace": trace}
 
 
+def decode_events(folder: Path, elf: Path, tool: str, fingerprint: str) -> list[dict]:
+    """ELF-resolve only actual recorded call-site PCs for the same build."""
+    from elftools.elf.elffile import ELFFile
+
+    source = folder / "events.ndjson"
+    if not source.is_file():
+        return []
+    validate_elf(elf, {"fingerprint": fingerprint})
+    with elf.open("rb") as stream:
+        image = ELFFile(stream)
+        sections = [(s.name, s["sh_addr"], s["sh_addr"] + s["sh_size"])
+                    for s in image.iter_sections() if s["sh_flags"] & 4]
+    decoded = []
+    for number, line in enumerate(source.read_text().splitlines(), 1):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Corrupt diagnostic event line {number}: {exc}") from exc
+        if event.get("fingerprint") != fingerprint:
+            event["location"] = "different build (requires its own archived ELF)"
+        else:
+            addr = int(event["pc"], 16) - 1
+            section = next((name for name, start, end in sections if start <= addr < end), None)
+            if section is None:
+                event["location"] = "PC outside executable ELF sections"
+            else:
+                event["section"] = section
+                event["location"] = addr2line(elf, addr, tool)
+        decoded.append(event)
+        print(f"{event['category']} {event.get('level', 'unknown')} "
+              f"code={event['code']} value={event['value']} boot={event['boot']} "
+              f"t={event['uptime_ms']}ms section={event.get('section', 'n/a')}: "
+              f"{event['location']}")
+    (folder / "events_symbolicated.json").write_text(json.dumps(decoded, indent=2) + "\n")
+    return decoded
+
+
+async def download_optional(smp, folder: Path, filename: str):
+    from smpclient.generics import error
+    from smpclient.requests.file_management import FileStatus
+
+    name = "/lfs/" + filename
+    status = await smp.request(FileStatus(name=name), timeout_s=12)
+    if error(status):
+        if "FILE_NOT_FOUND" in str(status):
+            return
+        raise RuntimeError(f"Filesystem status failed for {name}: {status}")
+    payload = await smp.download_file(name, timeout_s=12)
+    (folder / filename).write_bytes(payload)
+    print(f"{folder / filename}: {len(payload)} bytes")
+
+
+async def download_diagnostics(smp, folder: Path, status: dict):
+    for filename in (*DIAGNOSTIC_FILES, *status.get("log_files", [])):
+        if filename.startswith("zephyr.") and (not filename[7:].isdigit() or "/" in filename):
+            raise ValueError(f"Invalid log filename from device: {filename!r}")
+        if filename not in FILES:
+            await download_optional(smp, folder, filename)
+        elif filename == "recent.log" and not (folder / filename).exists():
+            await download_optional(smp, folder, filename)
+
+
 async def scan(timeout: float, all_devices: bool = False):
     from bleak import BleakScanner
 
@@ -201,11 +274,16 @@ async def pull(device, elf: Path, tool: str, skip_symbolicate: bool):
     if not status["dump_pending"]:
         raise RuntimeError(f"No crash dump pending: {status}")
     folder = archive_dir()
-    async with SMPClient(SMPBLETransport(), device.address, timeout_s=12) as smp:
-        for name in FILES:
-            payload = await smp.download_file("/lfs/" + name, timeout_s=12)
-            (folder / name).write_bytes(payload)
-            print(f"{folder / name}: {len(payload)} bytes")
+    try:
+        async with SMPClient(SMPBLETransport(), device.address, timeout_s=12) as smp:
+            for name in FILES:
+                payload = await smp.download_file("/lfs/" + name, timeout_s=12)
+                (folder / name).write_bytes(payload)
+                print(f"{folder / name}: {len(payload)} bytes")
+            await download_diagnostics(smp, folder, status)
+    except Exception as exc:
+        record_host_failure(folder, device, status, exc)
+        raise
 
     meta = json.loads((folder / "meta.txt").read_text())
     if status["fingerprint"] != meta["fingerprint"] or status["crash_seq"] != meta["crash_seq"]:
@@ -220,7 +298,28 @@ async def pull(device, elf: Path, tool: str, skip_symbolicate: bool):
     if not skip_symbolicate:
         result = symbolicate(folder / "crash.bin", folder / "zephyr.elf", tool)
         (folder / "symbolication.json").write_text(json.dumps(result, indent=2) + "\n")
+        decode_events(folder, folder / "zephyr.elf", tool, meta["fingerprint"])
     return folder
+
+
+async def logs(device, elf: Path, tool: str):
+    from smpclient import SMPClient
+    from smpclient.transport.ble import SMPBLETransport
+
+    status = await read_status(device)
+    digest = validate_elf(elf, {"fingerprint": status["fingerprint"]})
+    folder = archive_dir()
+    try:
+        async with SMPClient(SMPBLETransport(), device.address, timeout_s=12) as smp:
+            await download_diagnostics(smp, folder, status)
+    except Exception as exc:
+        record_host_failure(folder, device, status, exc)
+        raise
+    shutil.copy2(elf, folder / "zephyr.elf")
+    (folder / "manifest.json").write_text(json.dumps({"device": device.address,
+        "elf_sha256": digest, "status": status}, indent=2) + "\n")
+    decode_events(folder, folder / "zephyr.elf", tool, status["fingerprint"])
+    print(f"Saved diagnostics to {folder}")
 
 
 async def main(args):
@@ -228,6 +327,12 @@ async def main(args):
         elf = args.elf or args.dump.with_name("zephyr.elf")
         result = symbolicate(args.dump, elf, args.addr2line)
         args.dump.with_name("symbolication.json").write_text(json.dumps(result, indent=2) + "\n")
+        decode_events(args.dump.parent, elf, args.addr2line, result["meta"]["fingerprint"])
+        return
+    if args.action == "decode-events":
+        elf = args.elf or args.folder / "zephyr.elf"
+        manifest = json.loads((args.folder / "manifest.json").read_text())
+        decode_events(args.folder, elf, args.addr2line, manifest["status"]["fingerprint"])
         return
     if args.action == "scan":
         await scan(args.timeout, args.all)
@@ -246,6 +351,22 @@ async def main(args):
         print("Requested deletion of archived dump on device")
     elif args.action == "pull":
         await pull(device, args.elf or DEFAULT_ELF, args.addr2line, args.skip_symbolicate)
+    elif args.action == "logs":
+        await logs(device, args.elf or DEFAULT_ELF, args.addr2line)
+    elif args.action == "emit":
+        await command(device, SAMPLES[args.type])
+        print(f"Injected synthetic {args.type} diagnostic (not a real failure)")
+    elif args.action == "ota-check":
+        from smpclient import SMPClient
+        from smpclient.generics import error
+        from smpclient.requests.image_management import ImageStatesRead
+        from smpclient.transport.ble import SMPBLETransport
+
+        async with SMPClient(SMPBLETransport(), device.address, timeout_s=12) as smp:
+            reply = await smp.request(ImageStatesRead(), timeout_s=12)
+        print(f"MCUmgr OTA/image-group response: {reply}")
+        if not error(reply):
+            raise RuntimeError("Unexpected image management support (no MCUboot in this lab)")
 
 
 if __name__ == "__main__":
@@ -261,10 +382,16 @@ if __name__ == "__main__":
     crashes.add_argument("type", choices=NAMES)
     actions.add_parser("reboot")
     actions.add_parser("clear")
+    actions.add_parser("logs")
+    actions.add_parser("ota-check")
+    emit = actions.add_parser("emit")
+    emit.add_argument("type", choices=SAMPLES)
     pull_parser = actions.add_parser("pull")
     pull_parser.add_argument("--skip-symbolicate", action="store_true")
     sym = actions.add_parser("symbolicate")
     sym.add_argument("dump", type=Path, help="host/out/<timestamp>/crash.bin")
+    dec = actions.add_parser("decode-events")
+    dec.add_argument("folder", type=Path, help="host/out/<timestamp> with manifest.json")
     args = p.parse_args()
     try:
         asyncio.run(main(args))

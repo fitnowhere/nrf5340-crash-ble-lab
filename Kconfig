@@ -28,4 +28,11 @@ config CRASH_LAB_STACK_SMASH
 	help
 	  Adds crash type 4. Types 0..3 are always available.
 
+config CRASH_LAB_METRICS_INTERVAL_SECONDS
+	int "Health metrics interval (seconds)"
+	default 60
+	range 10 3600
+	help
+	  Record the system workqueue stack's unused bytes periodically.
+
 endmenu
